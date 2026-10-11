@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#05030a" />
+    <title>Space Invaders 3D</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #05030a; color: #f2ead8; font: 600 15px system-ui, sans-serif; letter-spacing: 0.2em; }
+      body { display: grid; place-items: center; }
+      a { color: #ff2a3d; }
+    </style>
+  </head>
+  <body>
+    <p>LOADING 3D</p>
+    <noscript><p><a href="gl/">Start the game</a></p></noscript>
+    <script>
+      // WebGPU where the browser has a working adapter (bloom and glow); WebGL2 everywhere else.
+      // Add ?gl to force the WebGL version.
+      (async function () {
+        var flavour = "gl";
+        try {
+          if (navigator.gpu && !/[?&]gl\b/.test(location.search)) {
+            var adapter = await navigator.gpu.requestAdapter();
+            if (adapter) flavour = "gpu";
+          }
+        } catch (e) {}
+        location.replace(flavour + "/" + location.search + location.hash);
+      })();
+    </script>
+  </body>
+</html>

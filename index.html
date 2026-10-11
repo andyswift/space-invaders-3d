@@ -23,6 +23,18 @@
         position: absolute; right: 10px; bottom: 10px; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px;
         background: rgba(242, 234, 216, 0.14); color: #f2ead8; cursor: pointer; display: none; place-items: center;
       }
+      #loading {
+        position: absolute; inset: 0; display: grid; place-items: center; align-content: center; gap: 14px; text-align: center;
+        color: #f2ead8; font: 600 15px/1.4 system-ui, sans-serif; letter-spacing: 0.2em; pointer-events: none;
+        background: #05030a;
+      }
+      #loading i { width: 38px; height: 38px; border: 3px solid rgba(242, 234, 216, 0.2); border-top-color: #ff2a3d; border-radius: 50%; animation: spin 0.9s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      #home {
+        position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); padding: 8px 12px; border-radius: 8px;
+        color: rgba(242, 234, 216, 0.55); font: 13px system-ui, sans-serif; text-decoration: none; background: rgba(242, 234, 216, 0.08);
+      }
+      #home:hover { color: #f2ead8; background: rgba(242, 234, 216, 0.18); }
       #fs:hover { background: rgba(242, 234, 216, 0.28); }
       #fs svg { width: 22px; height: 22px; }
     </style>
@@ -73,6 +85,8 @@
     <div id="stage">
       <div id="frame">
         <canvas id="game"></canvas>
+        <div id="loading"><i></i><span>LOADING 3D</span></div>
+        <a id="home" href="../../">&larr; moaswift.no</a>
         <button id="fs" type="button" aria-label="Toggle full screen" title="Full screen">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
@@ -81,6 +95,10 @@
       </div>
     </div>
     <script>
+      // Trunk announces when the WebAssembly game has started; until then show the spinner.
+      window.addEventListener("TrunkApplicationStarted", function () {
+        setTimeout(function () { var l = document.getElementById("loading"); if (l) l.remove(); }, 400);
+      });
       // Full screen where the browser allows it (not iPhone Safari: there, "Add to Home Screen" runs full screen).
       (function () {
         var el = document.documentElement;

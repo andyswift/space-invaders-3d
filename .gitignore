@@ -1,3 +1,5 @@
 target/
 dist/
+dist-release/
+dist-stage/
 .DS_Store
