@@ -3752,6 +3752,7 @@ name = "space_invaders_3d"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "wasm-bindgen",
 ]
 
 [[package]]

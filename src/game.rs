@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use bevy::prelude::*;
 
 use crate::data::*;
+use crate::realm::{cave_creature, CamBase, Realm, RealmKind};
+use crate::{hi_get, hi_set, sfx};
 
 pub const COLS: usize = 11;
 pub const ROWS: usize = 5;
@@ -86,6 +88,8 @@ pub struct Controls {
     pub left: bool,
     pub right: bool,
     pub fire: bool,
+    /// Where a finger is steering the ship to (world x), if one is down.
+    pub target_x: Option<f32>,
 }
 
 #[derive(Resource)]
@@ -149,6 +153,12 @@ pub struct Invader {
     pub row: usize,
     pub kind: Kind,
 }
+impl Invader {
+    pub fn kind_index(&self) -> usize {
+        self.kind.idx()
+    }
+}
+
 #[derive(Component)]
 pub struct MainCamera;
 #[derive(Component)]
@@ -173,22 +183,35 @@ pub struct Particle {
 #[derive(Component)]
 pub struct GameEntity;
 
+/// Everything that differs between the two worlds: creature meshes and every material.
+pub struct RealmArt {
+    pub inv: [[Handle<Mesh>; 2]; 3],
+    pub inv_mat: [Handle<StandardMaterial>; 3],
+    pub ship_mat: Handle<StandardMaterial>,
+    pub ufo_mat: Handle<StandardMaterial>,
+    pub bullet_mat: Handle<StandardMaterial>,
+    pub bomb_mat: Handle<StandardMaterial>,
+    pub voxel_mat: Handle<StandardMaterial>,
+    pub spark_white: Handle<StandardMaterial>,
+}
+
 #[derive(Resource)]
 pub struct Art {
-    inv: [[Handle<Mesh>; 2]; 3],
-    inv_mat: [Handle<StandardMaterial>; 3],
+    sets: [RealmArt; 2],
+    /// Index of the world currently shown (0 surface, 1 cave).
+    pub cur: usize,
     ship: Handle<Mesh>,
-    ship_mat: Handle<StandardMaterial>,
     ufo: Handle<Mesh>,
-    ufo_mat: Handle<StandardMaterial>,
     bullet: Handle<Mesh>,
-    bullet_mat: Handle<StandardMaterial>,
     bomb: Handle<Mesh>,
-    bomb_mat: Handle<StandardMaterial>,
     voxel: Handle<Mesh>,
-    voxel_mat: Handle<StandardMaterial>,
     spark: Handle<Mesh>,
-    spark_white: Handle<StandardMaterial>,
+}
+
+impl Art {
+    pub fn cur(&self) -> &RealmArt {
+        &self.sets[self.cur]
+    }
 }
 
 fn glow(color: Color, strength: f32) -> StandardMaterial {
@@ -210,7 +233,10 @@ impl Plugin for GamePlugin {
             .init_resource::<Respawn>()
             .insert_resource(Rng(0x2545_F491_4F6C_DD1D))
             .insert_resource(Formation::fresh(1, 15.0))
-            .add_systems(Startup, (setup_art, setup_scene, new_game).chain())
+            .insert_resource(Realm { kind: RealmKind::Surface, timer: 30.0, len: 30.0, flip: 0.0, warned: false, banner: 0.0 })
+            .add_systems(Startup, (load_hi, setup_art, setup_scene, new_game).chain())
+            .add_systems(OnEnter(GameState::Over), save_hi)
+            .add_systems(Update, pause_on_blur.run_if(in_state(GameState::Playing)))
             .add_systems(
                 OnTransition { exited: GameState::Menu, entered: GameState::Playing },
                 new_game,
@@ -236,7 +262,7 @@ impl Plugin for GamePlugin {
                         level_check,
                     )
                         .chain()
-                        .run_if(|r: Res<Respawn>| r.0 <= 0.0),
+                        .run_if(|r: Res<Respawn>, realm: Res<Realm>| r.0 <= 0.0 && !realm.flipping()),
                 )
                     .chain()
                     .run_if(in_state(GameState::Playing)),
@@ -244,42 +270,70 @@ impl Plugin for GamePlugin {
     }
 }
 
-fn setup_art(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+pub fn setup_art(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
     let mut frames = |f: &[[&str; 8]; 2], vox: f32| [meshes.add(voxels(&f[0], vox, 0.5)), meshes.add(voxels(&f[1], vox, 0.5))];
-    let inv = [frames(&SQUID, 0.125), frames(&CRAB, 0.125), frames(&OCTOPUS, 0.125)];
-    let art = Art {
-        inv,
+    let surface_inv = [frames(&SQUID, 0.125), frames(&CRAB, 0.125), frames(&OCTOPUS, 0.125)];
+    let cave_inv = [0, 1, 2].map(|k| [meshes.add(cave_creature(k, 0)), meshes.add(cave_creature(k, 1))]);
+
+    let surface = RealmArt {
+        inv: surface_inv,
         inv_mat: [
             materials.add(glow(Color::srgb(1.0, 0.35, 0.94), 2.0)),
             materials.add(glow(Color::srgb(0.35, 0.84, 1.0), 2.0)),
             materials.add(glow(Color::srgb(0.62, 1.0, 0.35), 2.0)),
         ],
-        ship: meshes.add(voxels(&SHIP, 0.16, 0.8)),
         ship_mat: materials.add(StandardMaterial {
             base_color: Color::srgb(0.95, 0.92, 0.85),
             emissive: LinearRgba::rgb(0.1, 0.5, 0.45),
             ..default()
         }),
-        ufo: meshes.add(voxels(&UFO, 0.13, 0.5)),
         ufo_mat: materials.add(glow(Color::srgb(1.0, 0.3, 0.3), 2.5)),
-        bullet: meshes.add(Cuboid::new(0.12, 0.12, 0.8)),
         bullet_mat: materials.add(glow(Color::srgb(1.0, 0.85, 0.85), 5.0)),
-        bomb: meshes.add(Cuboid::new(0.16, 0.16, 0.5)),
         bomb_mat: materials.add(glow(Color::srgb(1.0, 0.8, 0.3), 4.0)),
-        voxel: meshes.add(Cuboid::new(SHIELD_CELL * 0.94, 0.34, SHIELD_CELL * 0.94)),
         voxel_mat: materials.add(StandardMaterial {
             base_color: Color::srgb(0.07, 0.65, 0.55),
             emissive: LinearRgba::rgb(0.0, 0.25, 0.2),
             perceptual_roughness: 0.6,
             ..default()
         }),
-        spark: meshes.add(Cuboid::new(0.12, 0.12, 0.12)),
         spark_white: materials.add(glow(Color::WHITE, 4.0)),
     };
-    commands.insert_resource(art);
+    let cave = RealmArt {
+        inv: cave_inv,
+        inv_mat: [
+            materials.add(glow(Color::srgb(0.71, 0.55, 1.0), 1.4)),
+            materials.add(glow(Color::srgb(1.0, 0.62, 0.35), 1.4)),
+            materials.add(glow(Color::srgb(0.43, 1.0, 0.82), 1.4)),
+        ],
+        ship_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.93, 0.91, 1.0),
+            emissive: LinearRgba::rgb(0.15, 0.6, 0.55),
+            ..default()
+        }),
+        ufo_mat: materials.add(glow(Color::srgb(1.0, 0.54, 0.24), 2.5)),
+        bullet_mat: materials.add(glow(Color::srgb(0.75, 1.0, 0.97), 5.0)),
+        bomb_mat: materials.add(glow(Color::srgb(0.62, 1.0, 0.35), 4.0)),
+        voxel_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.36, 0.28, 0.22),
+            emissive: LinearRgba::rgb(0.05, 0.03, 0.02),
+            perceptual_roughness: 0.9,
+            ..default()
+        }),
+        spark_white: materials.add(glow(Color::srgb(0.85, 1.0, 0.95), 4.0)),
+    };
+    commands.insert_resource(Art {
+        sets: [surface, cave],
+        cur: 0,
+        ship: meshes.add(voxels(&SHIP, 0.16, 0.8)),
+        ufo: meshes.add(voxels(&UFO, 0.13, 0.5)),
+        bullet: meshes.add(Cuboid::new(0.12, 0.12, 0.8)),
+        bomb: meshes.add(Cuboid::new(0.16, 0.16, 0.5)),
+        voxel: meshes.add(Cuboid::new(SHIELD_CELL * 0.94, 0.34, SHIELD_CELL * 0.94)),
+        spark: meshes.add(Cuboid::new(0.12, 0.12, 0.12)),
+    });
 }
 
-fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn setup_scene(mut commands: Commands) {
     // Tilted arcade-table camera: above and behind the ship, looking down the table.
     let mut camera = commands.spawn((
         Camera3d::default(),
@@ -300,18 +354,6 @@ fn setup_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mat
         Transform::from_xyz(-5.0, 12.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     commands.insert_resource(GlobalAmbientLight { color: Color::srgb(0.5, 0.25, 0.4), brightness: 220.0, ..default() });
-
-    // The table.
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(26.0, 42.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.10, 0.03, 0.08),
-            perceptual_roughness: 0.35,
-            metallic: 0.2,
-            ..default()
-        })),
-        Transform::from_xyz(0.0, 0.0, -7.0),
-    ));
 }
 
 fn new_game(
@@ -322,7 +364,9 @@ fn new_game(
     mut f: ResMut<Formation>,
     mut respawn: ResMut<Respawn>,
     mut rng: ResMut<Rng>,
+    mut realm: ResMut<Realm>,
 ) {
+    *realm = Realm::fresh(&mut rng);
     for e in &old {
         commands.entity(e).despawn();
     }
@@ -339,7 +383,7 @@ fn new_game(
 fn spawn_player(commands: &mut Commands, art: &Art) {
     commands.spawn((
         Mesh3d(art.ship.clone()),
-        MeshMaterial3d(art.ship_mat.clone()),
+        MeshMaterial3d(art.cur().ship_mat.clone()),
         Transform::from_xyz(0.0, 0.0, PLAYER_Z).with_rotation(lean()),
         Player,
         GameEntity,
@@ -351,8 +395,8 @@ fn spawn_wave(commands: &mut Commands, art: &Art) {
         let kind = Kind::of_row(row);
         for col in 0..COLS {
             commands.spawn((
-                Mesh3d(art.inv[kind.idx()][0].clone()),
-                MeshMaterial3d(art.inv_mat[kind.idx()].clone()),
+                Mesh3d(art.cur().inv[kind.idx()][0].clone()),
+                MeshMaterial3d(art.cur().inv_mat[kind.idx()].clone()),
                 Transform::from_xyz(0.0, 0.0, START_Z).with_rotation(lean()),
                 Invader { col, row, kind },
                 GameEntity,
@@ -367,7 +411,7 @@ fn spawn_shields(commands: &mut Commands, art: &Art) {
         for &(c, r) in &cells {
             commands.spawn((
                 Mesh3d(art.voxel.clone()),
-                MeshMaterial3d(art.voxel_mat.clone()),
+                MeshMaterial3d(art.cur().voxel_mat.clone()),
                 Transform::from_xyz(
                     cx + (c as f32 - 9.5) * SHIELD_CELL,
                     0.17,
@@ -380,14 +424,34 @@ fn spawn_shields(commands: &mut Commands, art: &Art) {
     }
 }
 
-fn read_input(keys: Res<ButtonInput<KeyCode>>, mut c: ResMut<Controls>) {
+fn read_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    touches: Res<Touches>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut c: ResMut<Controls>,
+) {
+    // Touch: the ship follows the finger and fires while it is down (one shot in flight at a time).
+    c.target_x = None;
+    let mut touching = false;
+    if let (Some(t), Ok(w)) = (touches.iter().next(), windows.single()) {
+        touching = true;
+        let nx = (t.position().x / w.width().max(1.0)).clamp(0.0, 1.0);
+        c.target_x = Some(((nx * 2.0 - 1.0) * 10.7).clamp(-PLAYER_LIMIT, PLAYER_LIMIT));
+    }
     c.left = keys.pressed(KeyCode::ArrowLeft) || keys.pressed(KeyCode::KeyA);
     c.right = keys.pressed(KeyCode::ArrowRight) || keys.pressed(KeyCode::KeyD);
-    c.fire = keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW);
+    c.fire = touching || keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW);
 }
 
-fn state_input(keys: Res<ButtonInput<KeyCode>>, state: Res<State<GameState>>, mut next: ResMut<NextState<GameState>>) {
-    let start = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space);
+fn state_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    touches: Res<Touches>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    state: Res<State<GameState>>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    let tapped = touches.any_just_pressed() || mouse.just_pressed(MouseButton::Left);
+    let start = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) || tapped;
     let pause = keys.just_pressed(KeyCode::KeyP) || keys.just_pressed(KeyCode::Escape);
     match state.get() {
         GameState::Menu | GameState::Over if start => next.set(GameState::Playing),
@@ -411,7 +475,13 @@ fn tick_respawn(time: Res<Time>, mut respawn: ResMut<Respawn>, mut q: Query<&mut
 fn move_player(time: Res<Time>, c: Res<Controls>, mut q: Query<&mut Transform, With<Player>>) {
     let dir = (c.right as i32 - c.left as i32) as f32;
     for mut t in &mut q {
-        t.translation.x = (t.translation.x + dir * PLAYER_SPEED * time.delta_secs()).clamp(-PLAYER_LIMIT, PLAYER_LIMIT);
+        let step = PLAYER_SPEED * time.delta_secs();
+        let x = match c.target_x {
+            // Steer towards the finger, a little faster than the keyboard speed.
+            Some(target) => t.translation.x + (target - t.translation.x).clamp(-step * 1.6, step * 1.6),
+            None => t.translation.x + dir * step,
+        };
+        t.translation.x = x.clamp(-PLAYER_LIMIT, PLAYER_LIMIT);
     }
 }
 
@@ -428,11 +498,12 @@ fn fire(
     let Ok(p) = player.single() else { return };
     commands.spawn((
         Mesh3d(art.bullet.clone()),
-        MeshMaterial3d(art.bullet_mat.clone()),
+        MeshMaterial3d(art.cur().bullet_mat.clone()),
         Transform::from_xyz(p.translation.x, 0.5, p.translation.z - 0.8),
         PlayerBullet,
         GameEntity,
     ));
+    sfx("shoot", 0.0);
 }
 
 fn invader_pos(f: &Formation, inv: &Invader) -> Vec3 {
@@ -471,6 +542,7 @@ fn march(time: Res<Time>, stats: Res<Stats>, mut f: ResMut<Formation>, q: Query<
     }
     f.frame ^= 1;
     f.stepped = true;
+    sfx("march", f.frame as f32);
     if max_z + 0.3 >= LOSE_Z {
         next.set(GameState::Over);
     }
@@ -505,7 +577,7 @@ fn spawn_bombs(
     let p = invader_pos(&f, pick);
     commands.spawn((
         Mesh3d(art.bomb.clone()),
-        MeshMaterial3d(art.bomb_mat.clone()),
+        MeshMaterial3d(art.cur().bomb_mat.clone()),
         Transform::from_xyz(p.x, 0.5, p.z + 0.5),
         Bomb,
         GameEntity,
@@ -587,7 +659,8 @@ fn collisions(
                 commands.entity(e).despawn();
                 stats.score += inv.kind.points();
                 stats.hi = stats.hi.max(stats.score);
-                burst(&mut commands, &art, &mut rng, p + Vec3::Y * 0.4, art.inv_mat[inv.kind.idx()].clone(), 14, 3.5);
+                burst(&mut commands, &art, &mut rng, p + Vec3::Y * 0.4, art.cur().inv_mat[inv.kind.idx()].clone(), 14, 3.5);
+                sfx("hit", 0.0);
                 hit = true;
                 break;
             }
@@ -598,7 +671,8 @@ fn collisions(
                     let pts = [50, 100, 150, 300][rng.below(4)];
                     stats.score += pts;
                     stats.hi = stats.hi.max(stats.score);
-                    burst(&mut commands, &art, &mut rng, t.translation + Vec3::Y * 0.4, art.ufo_mat.clone(), 22, 4.5);
+                    burst(&mut commands, &art, &mut rng, t.translation + Vec3::Y * 0.4, art.cur().ufo_mat.clone(), 22, 4.5);
+                    sfx("ufoHit", 0.0);
                     commands.entity(e).despawn();
                     hit = true;
                     break;
@@ -616,7 +690,7 @@ fn collisions(
             }
             if touched {
                 erode(&mut commands, &voxels, &mut gone, &mut rng, b.x, b.z - 0.2);
-                burst(&mut commands, &art, &mut rng, Vec3::new(b.x, 0.4, b.z), art.voxel_mat.clone(), 5, 2.0);
+                burst(&mut commands, &art, &mut rng, Vec3::new(b.x, 0.4, b.z), art.cur().voxel_mat.clone(), 5, 2.0);
                 hit = true;
             }
         }
@@ -638,14 +712,15 @@ fn collisions(
         }
         if touched {
             erode(&mut commands, &voxels, &mut gone, &mut rng, b.x, b.z + 0.25);
-            burst(&mut commands, &art, &mut rng, Vec3::new(b.x, 0.4, b.z), art.voxel_mat.clone(), 5, 2.0);
+            burst(&mut commands, &art, &mut rng, Vec3::new(b.x, 0.4, b.z), art.cur().voxel_mat.clone(), 5, 2.0);
             commands.entity(e).despawn();
             continue;
         }
         if let Some((pe, p)) = player_pos {
             if (p.x - b.x).abs() < 0.75 && (p.z - b.z).abs() < 0.55 {
-                burst(&mut commands, &art, &mut rng, p + Vec3::Y * 0.4, art.spark_white.clone(), 30, 5.0);
+                burst(&mut commands, &art, &mut rng, p + Vec3::Y * 0.4, art.cur().spark_white.clone(), 30, 5.0);
                 stats.lives = stats.lives.saturating_sub(1);
+                sfx("die", 0.0);
                 for (be, _) in &bombs {
                     commands.entity(be).despawn();
                 }
@@ -680,12 +755,13 @@ fn ufo_system(
         let (x, vx) = if right { (-11.0, 4.5) } else { (11.0, -4.5) };
         commands.spawn((
             Mesh3d(art.ufo.clone()),
-            MeshMaterial3d(art.ufo_mat.clone()),
+            MeshMaterial3d(art.cur().ufo_mat.clone()),
             Transform::from_xyz(x, 0.7, UFO_Z).with_rotation(lean()),
             Ufo { vx },
             GameEntity,
         ));
         f.ufo_timer = rng.range(15.0, 25.0);
+        sfx("ufo", 0.0);
     }
     for (e, u, mut t) in &mut ufos {
         t.translation.x += u.vx * dt;
@@ -710,6 +786,7 @@ fn level_check(
     }
     stats.level += 1;
     stats.lives = (stats.lives + 1).min(5);
+    sfx("level", 0.0);
     for v in &voxels {
         commands.entity(v).despawn();
     }
@@ -723,7 +800,7 @@ fn animate_invaders(f: Res<Formation>, art: Res<Art>, mut q: Query<(&Invader, &m
     for (inv, mut t, mut mesh) in &mut q {
         let p = invader_pos(&f, inv);
         t.translation = p + Vec3::Y * (0.05 + ((time.elapsed_secs() * 2.0 + inv.col as f32 * 0.5 + inv.row as f32).sin() * 0.04));
-        let want = &art.inv[inv.kind.idx()][f.frame];
+        let want = &art.cur().inv[inv.kind.idx()][f.frame];
         if mesh.0 != *want {
             mesh.0 = want.clone();
         }
@@ -769,10 +846,11 @@ fn crush_shields(mut commands: Commands, f: Res<Formation>, invaders: Query<&Inv
 /// Fit the whole table to any screen: wide monitors, tall phones, resized windows.
 /// The camera keeps a fixed look direction and backs off just far enough that every key point is in view;
 /// on tall screens it also climbs higher so the table's width is used efficiently.
-fn fit_camera(
+pub fn fit_camera(
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut cam: Query<(&mut Transform, &Projection, &mut DistanceFog), With<MainCamera>>,
     mut ui_scale: ResMut<UiScale>,
+    mut base: ResMut<CamBase>,
     mut last: Local<(f32, f32)>,
 ) {
     let (Ok(win), Ok((mut tf, proj, mut fog))) = (windows.single(), cam.single_mut()) else { return };
@@ -786,9 +864,9 @@ fn fit_camera(
     // HUD text scales with the screen so it reads on a phone and a 4K monitor alike.
     ui_scale.0 = (w.min(h) / 720.0).clamp(0.55, 1.4);
 
-    // 36 degrees on wide screens, up to 58 on tall ones.
+    // 36 degrees on wide screens, up to 68 on tall ones.
     let tall = ((1.2 - aspect) / 0.6).clamp(0.0, 1.0);
-    let pitch = (36.0 + 22.0 * tall).to_radians();
+    let pitch = (36.0 + 32.0 * tall).to_radians();
     let dir = Vec3::new(0.0, pitch.sin(), pitch.cos());
     let key_points = [
         Vec3::new(-10.2, 0.0, 8.2),
@@ -814,6 +892,26 @@ fn fit_camera(
         dist += 0.5;
     }
     *tf = Transform::from_translation(CAM_TARGET + dir * dist).looking_at(CAM_TARGET, Vec3::Y);
+    base.0 = *tf;
     // Fog fades only the far end of the table, wherever the camera ended up.
     fog.falloff = FogFalloff::Linear { start: dist + 10.0, end: dist + 46.0 };
+}
+
+fn load_hi(mut stats: ResMut<Stats>) {
+    stats.hi = hi_get();
+}
+
+fn save_hi(stats: Res<Stats>) {
+    if stats.hi > hi_get() {
+        hi_set(stats.hi);
+    }
+}
+
+/// Switching tabs or apps pauses the game instead of letting the invaders keep coming.
+fn pause_on_blur(mut focus: MessageReader<bevy::window::WindowFocused>, mut next: ResMut<NextState<GameState>>) {
+    for e in focus.read() {
+        if !e.focused {
+            next.set(GameState::Paused);
+        }
+    }
 }

@@ -4,16 +4,107 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
     <meta name="theme-color" content="#05030a" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Space Invaders 3D</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
     <style>
       html, body { margin: 0; height: 100%; background: #05030a; overflow: hidden; overscroll-behavior: none; }
-      /* the canvas fills the whole screen, including under notches (safe areas are handled in-game) */
-      #stage { position: fixed; inset: 0; width: 100vw; height: 100dvh; }
-      #game { width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+      /* Edge to edge, but the playfield stays clear of notches and home indicators. */
+      #stage {
+        position: fixed; inset: 0; box-sizing: border-box; background: #05030a;
+        padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      }
+      #frame { position: relative; width: 100%; height: 100%; }
+      #game { width: 100%; height: 100%; display: block; touch-action: none; outline: none; -webkit-tap-highlight-color: transparent; }
+      #fs {
+        position: absolute; right: 10px; bottom: 10px; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px;
+        background: rgba(242, 234, 216, 0.14); color: #f2ead8; cursor: pointer; display: none; place-items: center;
+      }
+      #fs:hover { background: rgba(242, 234, 216, 0.28); }
+      #fs svg { width: 22px; height: 22px; }
     </style>
+    <script>
+      // Sound effects: a few lines of WebAudio, no audio files. Called from the game (Rust) as sfx(name, arg).
+      var __ctx = null, __muted = false;
+      function __unlock() {
+        if (!__ctx) { var C = window.AudioContext || window.webkitAudioContext; if (!C) return; __ctx = new C(); }
+        if (__ctx.state !== "running") __ctx.resume().catch(function () {});
+      }
+      ["pointerdown", "keydown", "touchstart"].forEach(function (t) { window.addEventListener(t, __unlock, { passive: true }); });
+      function __tone(type, f0, f1, dur, vol, delay) {
+        if (__muted || !__ctx || __ctx.state !== "running") return;
+        var t = __ctx.currentTime + (delay || 0);
+        var o = __ctx.createOscillator(), g = __ctx.createGain();
+        o.type = type;
+        o.frequency.setValueAtTime(f0, t);
+        o.frequency.exponentialRampToValueAtTime(Math.max(f1, 1), t + dur);
+        g.gain.setValueAtTime(vol, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+        o.connect(g).connect(__ctx.destination);
+        o.start(t); o.stop(t + dur);
+      }
+      function hi_get() { try { return +localStorage.getItem("invaders3d-hi") || 0; } catch (e) { return 0; } }
+      function hi_set(v) { try { localStorage.setItem("invaders3d-hi", String(v)); } catch (e) {} }
+      function __vibe(p) { try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) {} }
+      var __march = [55, 49, 44, 41], __m = 0;
+      function sfx(name, arg) {
+        switch (name) {
+          case "shoot": return __tone("square", 880, 200, 0.12, 0.1);
+          case "hit": __vibe(12); return __tone("sawtooth", 300, 40, 0.2, 0.12);
+          case "ufoHit": return __tone("sawtooth", 900, 100, 0.4, 0.12);
+          case "die": __vibe(220); return __tone("sawtooth", 260, 30, 0.7, 0.16);
+          case "march": var f = __march[__m++ % 4]; return __tone("square", f, f * 0.9, 0.09, 0.12);
+          case "ufo": return __tone("sine", 700, 500, 0.3, 0.05);
+          case "level": return __tone("square", 440, 880, 0.4, 0.1);
+          case "rumble": return __tone("sawtooth", 70, 38, 1.8, 0.1);
+          case "flip": __vibe([60, 40, 140]); __tone("sawtooth", 220, 40, 0.45, 0.16); return __tone("sawtooth", 40, 330, 0.45, 0.16, 0.45);
+        }
+      }
+      window.addEventListener("keydown", function (e) { if (e.code === "KeyM") __muted = !__muted; });
+    </script>
+    <link data-trunk rel="copy-file" href="manifest.webmanifest" />
+    <link data-trunk rel="copy-file" href="icon.svg" />
     <link data-trunk rel="rust" data-wasm-opt="z" data-bin="space_invaders_3d" />
   </head>
   <body>
-    <div id="stage"><canvas id="game"></canvas></div>
+    <div id="stage">
+      <div id="frame">
+        <canvas id="game"></canvas>
+        <button id="fs" type="button" aria-label="Toggle full screen" title="Full screen">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+          </svg>
+        </button>
+      </div>
+    </div>
+    <script>
+      // Full screen where the browser allows it (not iPhone Safari: there, "Add to Home Screen" runs full screen).
+      (function () {
+        var el = document.documentElement;
+        var req = el.requestFullscreen || el.webkitRequestFullscreen;
+        var btn = document.getElementById("fs");
+        var isFull = function () { return document.fullscreenElement || document.webkitFullscreenElement; };
+        if (req && (document.fullscreenEnabled || document.webkitFullscreenEnabled)) {
+          btn.style.display = "grid";
+          btn.addEventListener("click", function () {
+            if (isFull()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); }
+            else {
+              Promise.resolve(req.call(el)).then(function () {
+                // On phones, also ask for the landscape the game looks best in; ignored where unsupported.
+                if (screen.orientation && screen.orientation.lock) screen.orientation.lock("landscape").catch(function () {});
+              }).catch(function () {});
+            }
+          });
+        }
+        // No pinch zoom, double-tap zoom or long-press menus fighting the game.
+        ["gesturestart", "gesturechange", "contextmenu"].forEach(function (t) {
+          document.addEventListener(t, function (e) { e.preventDefault(); }, { passive: false });
+        });
+        document.addEventListener("touchmove", function (e) { e.preventDefault(); }, { passive: false });
+      })();
+    </script>
   </body>
 </html>
